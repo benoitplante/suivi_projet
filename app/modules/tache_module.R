@@ -3,21 +3,25 @@
 library(shiny)
 library(DT)
 library(dplyr)
+library(shinyjs)
 
 tache_ui <- function(id) {
   ns <- NS(id)
   tagList(
+    shinyjs::useShinyjs(),
     fluidRow(
       column(6,
-             h4("Ajouter une tâche"),
+             h4("Ajouter / Modifier une tâche"),
              selectInput(ns("projet_associe"), "Projet associé", choices = NULL),
              textInput(ns("nom_tache"), "Nom de la tâche"),
              textAreaInput(ns("description_tache"), "Description", height = "100px"),
-             dateInput(ns("date_echeance_tache"), "Date d'échéance"),
+             dateInput(ns("date_echeance_tache"), "Date d'échéance", value = Sys.Date()),
              selectInput(ns("priorite"), "Priorité", choices = c("Basse", "Moyenne", "Haute")),
              numericInput(ns("duree_estimee"), "Durée estimée (h)", value = 1, min = 0.5, step = 0.5),
              selectInput(ns("statut_tache"), "Statut", choices = c("À faire", "En cours", "Complétée")),
-             actionButton(ns("ajouter_tache"), "Ajouter tâche", class = "btn-primary")
+             shinyjs::hidden(textInput(ns("id_tache_modif"), "ID tâche")),
+             actionButton(ns("ajouter_tache"), "Ajouter tâche", class = "btn-primary"),
+             actionButton(ns("modifier_tache"), "Modifier tâche", class = "btn-warning")
       ),
       column(6,
              h4("Liste des tâches"),
@@ -34,7 +38,7 @@ tache_server <- function(id) {
     fichier_taches <- "data/taches.rds"
     fichier_projets <- "data/projets.rds"
 
-    # Chargement projets (pour le menu déroulant)
+    # Charger les projets pour les menus
     observe({
       if (file.exists(fichier_projets)) {
         projets <- readRDS(fichier_projets)
@@ -53,7 +57,16 @@ tache_server <- function(id) {
       }
     })
 
-    # Ajout d'une tâche
+    # Filtrage selon projet sélectionné
+    taches_filtrees <- reactive({
+      df <- taches()
+      if (input$filtre_projet == "Tous" || is.null(input$filtre_projet)) return(df)
+      projets <- readRDS(fichier_projets)
+      id <- projets$id_projet[projets$nom_projet == input$filtre_projet]
+      filter(df, id_projet == id)
+    })
+
+    # Ajouter tâche
     observeEvent(input$ajouter_tache, {
       if (input$nom_tache != "" && input$projet_associe != "") {
         nouvelle_tache <- tibble(
@@ -69,32 +82,54 @@ tache_server <- function(id) {
         maj <- bind_rows(taches(), nouvelle_tache)
         taches(maj)
         saveRDS(maj, fichier_taches)
-
-        # Réinitialisation formulaire
-        updateTextInput(session, "nom_tache", value = "")
-        updateTextAreaInput(session, "description_tache", value = "")
-        updateDateInput(session, "date_echeance_tache", value = Sys.Date())
-        updateSelectInput(session, "priorite", selected = "Moyenne")
-        updateNumericInput(session, "duree_estimee", value = 1)
-        updateSelectInput(session, "statut_tache", selected = "À faire")
+        reset_form()
       }
     })
 
-    # Filtrage
-    taches_filtrees <- reactive({
-      df <- taches()
-      if (input$filtre_projet == "Tous" || is.null(input$filtre_projet)) return(df)
-      projets <- readRDS(fichier_projets)
-      id <- projets$id_projet[projets$nom_projet == input$filtre_projet]
-      filter(df, id_projet == id)
+    # Préremplir formulaire lors sélection ligne
+    observeEvent(input$table_taches_rows_selected, {
+      sel <- input$table_taches_rows_selected
+      df <- taches_filtrees()
+      if (!is.null(sel) && nrow(df) >= sel) {
+        ligne <- df[sel, ]
+        updateSelectInput(session, "projet_associe", selected = ligne$id_projet)
+        updateTextInput(session, "nom_tache", value = ligne$nom_tache)
+        updateTextAreaInput(session, "description_tache", value = ligne$description_tache)
+        updateDateInput(session, "date_echeance_tache", value = ligne$date_echeance_tache)
+        updateSelectInput(session, "priorite", selected = ligne$priorite)
+        updateNumericInput(session, "duree_estimee", value = ligne$duree_estimee)
+        updateSelectInput(session, "statut_tache", selected = ligne$statut_tache)
+        updateTextInput(session, "id_tache_modif", value = ligne$id_tache)
+      }
     })
 
-    # Affichage
+    # Modifier tâche
+    observeEvent(input$modifier_tache, {
+      id <- input$id_tache_modif
+      df <- taches()
+      if (id != "" && id %in% df$id_tache) {
+        index <- which(df$id_tache == id)
+        df[index, ] <- tibble(
+          id_tache = id,
+          id_projet = input$projet_associe,
+          nom_tache = input$nom_tache,
+          description_tache = input$description_tache,
+          date_echeance_tache = input$date_echeance_tache,
+          priorite = input$priorite,
+          duree_estimee = input$duree_estimee,
+          statut_tache = input$statut_tache
+        )
+        taches(df)
+        saveRDS(df, fichier_taches)
+        reset_form()
+      }
+    })
+
+    # Affichage du tableau
     output$table_taches <- renderDataTable({
       df <- taches_filtrees()
-
-      if (nrow(df) > 0) {
-        projets <- if (file.exists(fichier_projets)) readRDS(fichier_projets) else tibble()
+      if (nrow(df) > 0 && file.exists(fichier_projets)) {
+        projets <- readRDS(fichier_projets)
         df <- left_join(df, projets, by = c("id_projet" = "id_projet")) |>
           mutate(
             statut_colore = case_when(
@@ -113,8 +148,19 @@ tache_server <- function(id) {
             `Durée (h)` = duree_estimee,
             Statut = statut_colore
           )
-        datatable(df, escape = FALSE, options = list(pageLength = 5))
+        datatable(df, escape = FALSE, selection = "single", options = list(pageLength = 5))
       }
     })
+
+    # Fonction pour vider le formulaire
+    reset_form <- function() {
+      updateTextInput(session, "nom_tache", value = "")
+      updateTextAreaInput(session, "description_tache", value = "")
+      updateDateInput(session, "date_echeance_tache", value = Sys.Date())
+      updateSelectInput(session, "priorite", selected = "Moyenne")
+      updateNumericInput(session, "duree_estimee", value = 1)
+      updateSelectInput(session, "statut_tache", selected = "À faire")
+      updateTextInput(session, "id_tache_modif", value = "")
+    }
   })
 }
